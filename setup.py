@@ -50,8 +50,9 @@ VERBOSE = '-v' in sys.argv
 static = sys.platform == 'win32'  # set to True with --static; set to False with --dynamic
 extra_compile_args = []
 sources = ['gevent/core.c']
-libraries = []
+libraries = ["event"]
 extra_objects = []
+do_download = False
 
 
 libevent_shared_name = 'libevent.so'
@@ -185,6 +186,56 @@ def unique(lst):
             result.append(item)
     return result
 
+def set_libevent_source(libevent_source_path):
+    add_include_dir(join(libevent_source_path, 'include'), must_exist=False)
+    add_include_dir(libevent_source_path, must_exist=False)
+    add_library_dir(join(libevent_source_path, '.libs'), must_exist=False)
+    if sys.platform == 'win32':
+        add_include_dir(join(libevent_source_path, 'compat'), must_exist=False)
+        add_include_dir(join(libevent_source_path, 'WIN32-Code'), must_exist=False)
+
+def download_and_compile():
+    import urllib, tarfile
+    try:
+        from hashlib import md5
+    except ImportError:
+        from md5 import md5
+
+    url = "http://www.monkey.org/~provos/libevent-1.4.13-stable.tar.gz"
+    fn = url.split("/")[-1]
+    dirname = fn[:-len(".tar.gz")]
+
+    if os.path.exists(fn):
+        pass
+    else:
+        print "downloading libevent source from", url
+        tgz = urllib.urlopen(url).read()
+        digest = md5(tgz).hexdigest()
+        if digest!="0b3ea18c634072d12b3c1ee734263664":
+            sys.exit("wrong md5 sum")
+        print "md5 sum ok"
+        open(fn, "wb").write(tgz)
+    
+    tf = tarfile.open(fn,'r:gz')
+    tf.extractall(".")
+
+    
+    os.chdir(dirname)
+    try:
+        if not os.path.exists("./config.status"):
+            os.system("./configure --with-pic --disable-shared")
+        os.system("make")
+        for line in open("Makefile"):
+            if line.startswith("LIBS = "):
+                addlibs = [x[2:] for x in line[len("LIBS = "):].strip().split() if x.startswith("-l")]
+                libraries.extend(addlibs)
+    finally:
+        os.chdir("..")
+
+    set_libevent_source(dirname)
+    
+    
+
 
 # parse options: -I NAME / -INAME / -L NAME / -LNAME / -1 / -2 / --libevent DIR / --static / --dynamic
 # we're cutting out options from sys.path instead of using optparse
@@ -206,15 +257,12 @@ while i < len(sys.argv):
         LIBEVENT_MAJOR = 1
     elif arg == '-2':
         LIBEVENT_MAJOR = 2
+    elif arg == '--download-and-compile-libevent':
+        do_download = True
     elif arg == '--libevent':
         del sys.argv[i]
         libevent_source_path = sys.argv[i]
-        add_include_dir(join(libevent_source_path, 'include'), must_exist=False)
-        add_include_dir(libevent_source_path, must_exist=False)
-        add_library_dir(join(libevent_source_path, '.libs'), must_exist=False)
-        if sys.platform == 'win32':
-            add_include_dir(join(libevent_source_path, 'compat'), must_exist=False)
-            add_include_dir(join(libevent_source_path, 'WIN32-Code'), must_exist=False)
+        set_libevent_source(libevent_source_path)
     elif arg == '--static':
         static = True
     elif arg == '--dynamic':
@@ -266,6 +314,9 @@ def guess_libevent_major():
 if not sys.argv[1:] or '-h' in sys.argv or '--help' in ' '.join(sys.argv):
     print __doc__
 else:
+    if do_download:
+        download_and_compile()
+        
     LIBEVENT_MAJOR = guess_libevent_major()
     if LIBEVENT_MAJOR is None:
         print 'Cannot guess the version of libevent installed on your system. DEFAULTING TO 1.x.x'
@@ -293,12 +344,11 @@ else:
             libevent_sources.append('WIN32-Code/win32.c')
             extra_compile_args += ['-DWIN32']
         else:
+            libraries = []
             libevent_sources += ['select.c']
             print 'XXX --static is not well supported on non-win32 platforms: only select is enabled'
         for filename in libevent_sources:
             sources.append( join(libevent_source_path, filename) )
-    else:
-        libraries = ['event']
 
 
 gevent_core = Extension(name='gevent.core',
