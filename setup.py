@@ -17,7 +17,16 @@ Also,
 
 is a shortcut for
 
-    setup.py build -IDIR -IDIR/include LDIR/.libs
+    setup.py build -IDIR -IDIR/include -LDIR/.libs
+
+If you have no libevent installed, or your installed version of
+libevent is too old, you can run
+
+    setup.py build_libevent build install
+
+in order to download and compile libevent and link statically against
+that version instead. It will download libevent to the current
+directory and also build it there.
 
 """
 
@@ -27,9 +36,13 @@ is a shortcut for
 import sys
 import os
 import re
-import traceback
-from distutils.core import Extension, setup
-from os.path import join, isdir, abspath, basename
+import time
+from distutils.core import Extension, setup, Command
+from distutils.command import build_ext, config
+from distutils import sysconfig
+
+from os.path import join, split, exists, isdir, abspath, basename
+
 
 __version__ = re.search("__version__\s*=\s*'(.*)'", open('gevent/__init__.py').read(), re.M).group(1)
 assert __version__
@@ -46,39 +59,199 @@ libraries = []
 extra_objects = []
 
 
+class build_libevent1(Command):
+    description = "download and compile libevent"
+    user_options = []
+    url = "http://www.monkey.org/~provos/libevent-1.4.13-stable.tar.gz"
+    digest = "0b3ea18c634072d12b3c1ee734263664"
+    basename = "libevent-1.4.13-stable"
+
+    def finalize_options(self):
+        pass
+
+    def initialize_options(self):
+        pass
+
+    def run(self):
+        import urllib
+        import tarfile
+        try:
+            from hashlib import md5
+        except ImportError:
+            from md5 import md5
+        url = self.url
+
+        fn = url.split("/")[-1]
+        dirname = fn[:-len(".tar.gz")]
+        fn = os.path.abspath(fn)
+
+        if exists(fn):
+            pass
+        else:
+            print "downloading libevent source from %s to %s" % (url, fn)
+            tgz = urllib.urlopen(url).read()
+            digest = md5(tgz).hexdigest()
+            if digest != self.digest:
+                sys.exit("wrong md5 sum")
+            open(fn, "wb").write(tgz)
+
+        tf = tarfile.open(fn, 'r:gz')
+        tf.extractall(".")
+        addlibs = []
+
+        cwd = os.getcwd()
+        os.chdir(dirname)
+        try:
+            if "CC" not in os.environ:
+                cc = sysconfig.get_config_var("CC")
+                if cc:
+                    os.environ["CC"] = cc
+
+            if not exists("./config.status"):
+                err = os.system("./configure --with-pic --disable-shared")
+                if err:
+                    sys.exit("running './configure --with-pic --disable-shared' failed")
+            err = os.system("make")
+            if err:
+                sys.exit("running 'make' failed")
+
+            for line in open("Makefile"):
+                if line.startswith("LIBS = "):
+                    addlibs = [x[2:] for x in line[len("LIBS = "):].strip().split() if x.startswith("-l")]
+        finally:
+            os.chdir(cwd)
+
+        config = self.distribution.reinitialize_command('config')
+        config.include_dirs = [self.basename, "%s/include" % self.basename]
+        config.library_dirs = ["%s/.libs" % self.basename]
+        config.libraries = addlibs
+
+
+class build_libevent2(build_libevent1):
+    url = "http://www.monkey.org/~provos/libevent-2.0.5-beta.tar.gz"
+    digest = "600c2ebbcc04b1235df2baccf2767307"
+    basename = "libevent-2.0.5-beta"
+
+# use libevent2 on OS X. libevent 1 gives me segfaults!
+if sys.platform == "darwin":
+    build_libevent = build_libevent2
+else:
+    build_libevent = build_libevent1
+
+
+def fix_compiler(compiler):
+    if sys.platform == "darwin":
+        # stupid apple: http://developer.apple.com/mac/library/qa/qa2006/qa1393.html
+        compiler.linker_so += ['-Wl,-search_paths_first']
+        compiler.linker_exe += ['-Wl,-search_paths_first']
+
+
+class my_config(config.config):
+    def finalize_options(self):
+        config.config.finalize_options(self)
+        if self.include_dirs is None:
+            self.include_dirs = []
+        self.include_dirs += include_dirs
+        del include_dirs[:]
+        if self.library_dirs is None:
+            self.library_dirs = []
+        self.library_dirs += library_dirs
+        del library_dirs[:]
+
+    def run(self):
+        self._check_compiler()
+        fix_compiler(self.compiler)
+        version = None
+
+        # both libevent2 and libevent1 install event.h.
+        if self.check_header("event.h"):
+            if self.search_cpp(".*GEVENT_USING_LIBEVENT_2.*", """
+#include <event.h>
+#if _EVENT_NUMERIC_VERSION >= 0x02000000
+GEVENT_USING_LIBEVENT_2
+#endif
+"""):
+                version = 2
+            else:
+                version = 1
+
+        if not version:  # compat headers not installed? XXX does this make sense?
+            if self.check_header("event2/event.h"):
+                version = 2
+
+        if not version:
+            sys.exit("libevent headers not found")
+
+        if not self.check_lib("event"):
+            sys.exit("cannot link with libevent")
+
+        if self.check_func("evbuffer_get_length", libraries=["event"], decl=1, call=1):
+            linker_version = 2
+        else:
+            linker_version = 1
+
+        if not self.check_func("evhttp_new", libraries=["event"], decl=1, call=1):
+            sys.exit("evhttp_new function not found. your libevent version is too old.")
+
+        if linker_version != version:
+            sys.exit("version mismatch detected: include files for libevent %s found , but linking against libevent %s" % (version, linker_version))
+
+        build = self.distribution.reinitialize_command('build_ext')
+        build.include_dirs = self.include_dirs
+        build.library_dirs = self.library_dirs
+        build.libraries = self.libraries
+
+
 # hack: create a symlink from build/../core.so to gevent/core.so to prevent "ImportError: cannot import name core" failures
-cmdclass = {}
-try:
-    from distutils.command import build_ext
-    class my_build_ext(build_ext.build_ext):
-        def build_extension(self, ext):
-            result = build_ext.build_ext.build_extension(self, ext)
-            try:
-                fullname = self.get_ext_fullname(ext.name)
-                modpath = fullname.split('.')
-                filename = self.get_ext_filename(ext.name)
-                filename = os.path.split(filename)[-1]
-                if not self.inplace:
-                    filename = os.path.join(*modpath[:-1] + [filename])
-                    path_to_build_core_so = abspath(os.path.join(self.build_lib, filename))
-                    path_to_core_so = abspath(join('gevent', basename(path_to_build_core_so)))
-                    if path_to_build_core_so != path_to_core_so:
-                        print 'Linking %s to %s' % (path_to_build_core_so, path_to_core_so)
-                        try:
-                            os.unlink(path_to_core_so)
-                        except OSError:
-                            pass
-                        if hasattr(os, 'symlink'):
-                            os.symlink(path_to_build_core_so, path_to_core_so)
-                        else:
-                            import shutil
-                            shutil.copyfile(path_to_build_core_so, path_to_core_so)
-            except Exception:
-                traceback.print_exc()
+class my_build_ext(build_ext.build_ext):
+    def finalize_options(self):
+        try:
+            self.run_command('config')
+        except SystemExit, err:
+            gevent_build_libevent = os.environ.get("GEVENT_BUILD_LIBEVENT")
+            if not gevent_build_libevent:
+                raise err
+
+            print "\ngevent setup.py: could not find a working libevent installation: %s" % (err, )
+            print "setup.py will download libevent and compile it in 5 seconds (hit CTRL-C to abort)\n"
+            time.sleep(5)
+            if gevent_build_libevent == "1":
+                self.run_command("build_libevent1")
+            elif gevent_build_libevent == "2":
+                self.run_command("build_libevent2")
+            else:
+                self.run_command("build_libevent")
+
+            self.run_command('config')
+
+        build_ext.build_ext.finalize_options(self)
+
+    def build_extension(self, ext):
+        fix_compiler(self.compiler)
+        result = build_ext.build_ext.build_extension(self, ext)
+        if self.inplace:
             return result
-    cmdclass = {'build_ext': my_build_ext}
-except Exception:
-    traceback.print_exc()
+
+        fullname = self.get_ext_fullname(ext.name)
+        modpath = fullname.split('.')
+        filename = self.get_ext_filename(ext.name)
+        filename = split(filename)[-1]
+        filename = join(*modpath[:-1] + [filename])
+        path_to_build_core_so = abspath(join(self.build_lib, filename))
+        path_to_core_so = abspath(join('gevent', basename(path_to_build_core_so)))
+        if path_to_build_core_so != path_to_core_so:
+            print 'Linking %s to %s' % (path_to_build_core_so, path_to_core_so)
+            try:
+                os.unlink(path_to_core_so)
+            except OSError:
+                pass
+            if hasattr(os, 'symlink'):
+                os.symlink(path_to_build_core_so, path_to_core_so)
+            else:
+                import shutil
+                shutil.copyfile(path_to_build_core_so, path_to_core_so)
+
+        return result
 
 
 def check_dir(path, must_exist):
@@ -98,7 +271,6 @@ def add_library_dir(path, must_exist=True):
     if path not in library_dirs:
         check_dir(path, must_exist)
         library_dirs.append(path)
-
 
 # parse options: -I NAME / -INAME / -L NAME / -LNAME / --libevent DIR / --static / --dynamic
 # we're cutting out options from sys.path instead of using optparse
@@ -130,7 +302,7 @@ while i < len(sys.argv):
     elif arg == '--dynamic':
         static = False
     else:
-        i = i+1
+        i += 1
         continue
     del sys.argv[i]
 
@@ -154,15 +326,15 @@ else:
                             'strlcpy.c']
         if sys.platform == 'win32':
             libraries = ['wsock32', 'advapi32']
-            include_dirs.extend([ join(libevent_source_path, 'WIN32-Code'),
-                                  join(libevent_source_path, 'compat') ])
+            include_dirs.extend([join(libevent_source_path, 'WIN32-Code'),
+                                 join(libevent_source_path, 'compat')])
             libevent_sources.append('WIN32-Code/win32.c')
             extra_compile_args += ['-DWIN32']
         else:
             libevent_sources += ['select.c']
             print 'XXX --static is not well supported on non-win32 platforms: only select is enabled'
         for filename in libevent_sources:
-            sources.append( join(libevent_source_path, filename) )
+            sources.append(join(libevent_source_path, filename))
     else:
         libraries = ['event']
 
@@ -186,7 +358,9 @@ if __name__ == '__main__':
         url='http://www.gevent.org/',
         packages=['gevent'],
         ext_modules=[gevent_core],
-        cmdclass=cmdclass,
+        cmdclass=dict(build_ext=my_build_ext, config=my_config,
+                      build_libevent=build_libevent,  build_libevent1=build_libevent,
+                      build_libevent2=build_libevent2),
         classifiers=[
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python",
@@ -196,6 +370,4 @@ if __name__ == '__main__':
         "Topic :: Internet",
         "Topic :: Software Development :: Libraries :: Python Modules",
         "Intended Audience :: Developers",
-        "Development Status :: 4 - Beta"]
-        )
-
+        "Development Status :: 4 - Beta"])
