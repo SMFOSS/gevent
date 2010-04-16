@@ -29,13 +29,10 @@ is a shortcut for
 import sys
 import os
 import re
-import traceback
 from distutils.core import Extension, setup
-from os.path import join, exists, isdir, abspath, basename
-try:
-    import ctypes
-except ImportError:
-    ctypes = None
+from distutils.command import build_ext, config
+
+from os.path import join, split, exists, isdir, abspath, basename
 
 
 __version__ = re.search("__version__\s*=\s*'(.*)'", open('gevent/__init__.py').read(), re.M).group(1)
@@ -45,7 +42,6 @@ assert __version__
 include_dirs = []                 # specified by -I
 library_dirs = []                 # specified by -L
 libevent_source_path = None       # specified by --libevent
-LIBEVENT_MAJOR = None             # 1 or 2, specified by -1 or -2
 VERBOSE = '-v' in sys.argv
 static = sys.platform == 'win32'  # set to True with --static; set to False with --dynamic
 extra_compile_args = []
@@ -53,48 +49,78 @@ sources = ['gevent/core.c']
 libraries = []
 extra_objects = []
 
+class my_config(config.config):
+    def run(self):
+        version = None
 
-libevent_shared_name = 'libevent.so'
-if sys.platform == 'darwin':
-    libevent_shared_name = 'libevent.dylib'
-elif sys.platform == 'win32':
-    libevent_shared_name = 'libevent.dll'
+        # both libevent2 and libevent1 install event.h.
+        if self.check_header("event.h"):
+            if self.search_cpp(".*GEVENT_USING_LIBEVENT_2.*", """
+#include <event.h>
+#if _EVENT_NUMERIC_VERSION >= 0x02000000
+GEVENT_USING_LIBEVENT_2
+#endif
+"""):
+                version = 2
+            else:
+                version = 1
+
+        if not version: # compat headers not installed? XXX does this make sense?
+            if self.check_header("event2/event.h"):
+                version = 2
+
+        if not version:
+            raise RuntimeError("libevent headers not found")
+
+        if not self.check_lib("event"):
+            raise RuntimeError("cannot link with libevent")
+
+        if self.check_func("evbuffer_get_length", libraries=["event"], decl=1, call=1):
+            linker_version = 2
+        else:
+            linker_version = 1
+
+        if linker_version != version:
+            raise RuntimeError("version mismatch detected: include files for libevent %s found , but linking against libevent %s" % (version, linker_version))
+
+        build = self.distribution.reinitialize_command('build_ext')
+        build.define = 'USE_LIBEVENT_%s' % version
+        build.include_dirs = self.include_dirs
+        build.library_dirs = self.library_dirs
 
 
 # hack: create a symlink from build/../core.so to gevent/core.so to prevent "ImportError: cannot import name core" failures
-cmdclass = {}
-try:
-    from distutils.command import build_ext
-    class my_build_ext(build_ext.build_ext):
-        def build_extension(self, ext):
-            result = build_ext.build_ext.build_extension(self, ext)
-            try:
-                fullname = self.get_ext_fullname(ext.name)
-                modpath = fullname.split('.')
-                filename = self.get_ext_filename(ext.name)
-                filename = os.path.split(filename)[-1]
-                if not self.inplace:
-                    filename = os.path.join(*modpath[:-1] + [filename])
-                    path_to_build_core_so = abspath(os.path.join(self.build_lib, filename))
-                    path_to_core_so = abspath(join('gevent', basename(path_to_build_core_so)))
-                    if path_to_build_core_so != path_to_core_so:
-                        print 'Linking %s to %s' % (path_to_build_core_so, path_to_core_so)
-                        try:
-                            os.unlink(path_to_core_so)
-                        except OSError:
-                            pass
-                        if hasattr(os, 'symlink'):
-                            os.symlink(path_to_build_core_so, path_to_core_so)
-                        else:
-                            import shutil
-                            shutil.copyfile(path_to_build_core_so, path_to_core_so)
-            except Exception:
-                traceback.print_exc()
-            return result
-    cmdclass = {'build_ext': my_build_ext}
-except Exception:
-    traceback.print_exc()
 
+class my_build_ext(build_ext.build_ext):
+    def finalize_options(self):
+        self.run_command('config')
+        build_ext.build_ext.finalize_options(self)
+
+    def build_extension(self, ext):
+        result = build_ext.build_ext.build_extension(self, ext)
+        if self.inplace:
+            return result
+
+        fullname = self.get_ext_fullname(ext.name)
+        modpath = fullname.split('.')
+        filename = self.get_ext_filename(ext.name)
+        filename = split(filename)[-1]
+        filename = join(*modpath[:-1] + [filename])
+        path_to_build_core_so = abspath(join(self.build_lib, filename))
+        path_to_core_so = abspath(join('gevent', basename(path_to_build_core_so)))
+        if path_to_build_core_so != path_to_core_so:
+            print 'Linking %s to %s' % (path_to_build_core_so, path_to_core_so)
+            try:
+                os.unlink(path_to_core_so)
+            except OSError:
+                pass
+            if hasattr(os, 'symlink'):
+                os.symlink(path_to_build_core_so, path_to_core_so)
+            else:
+                import shutil
+                shutil.copyfile(path_to_build_core_so, path_to_core_so)
+
+        return result
 
 def check_dir(path, must_exist):
     if not isdir(path):
@@ -114,101 +140,13 @@ def add_library_dir(path, must_exist=True):
         check_dir(path, must_exist)
         library_dirs.append(path)
 
-
-def get_version_from_include_path(d):
-    if VERBOSE:
-        print 'checking %s for event2/event.h (libevent 2) and event.h (libevent 1)' % d
-    event_h = join(d, 'event2', 'event.h')
-    if exists(event_h):
-        print 'Using libevent 2: %s' % event_h
-        return 2
-    event_h = join(d, 'event.h')
-    if exists(event_h):
-        print 'Using libevent 1: %s' % event_h
-        return 1
-
-
-def get_version_from_ctypes(cdll, path):
-    try:
-        get_version = cdll.event_get_version
-        get_version.restype = ctypes.c_char_p
-    except AttributeError:
-        pass
-    else:
-        version = get_version()
-        print 'Using libevent %s: %s' % (version, path)
-        if version.startswith('1'):
-            return 1
-        elif version.startswith('2'):
-            return 2
-        else:
-            print 'Weird response from %s get_version(): %r' % (path, version)
-
-
-def get_version_from_path(path):
-    """
-    >>> get_version_from_path('libevent-1.4.13-stable')
-    Using libevent 1: "libevent-1.4.13-stable"
-    1
-    >>> get_version_from_path('libevent-2.0.1-stable')
-    Using libevent 2: "libevent-2.0.1-stable"
-    2
-    >>> get_version_from_path('libevent-2.1.1-alpha')
-    Using libevent 2: "libevent-2.1.1-alpha"
-    2
-    >>> get_version_from_path('xxx-3.1.1-beta')
-    """
-    v1 = re.search(r'[^\d\.]1\.', path)
-    v2 = re.search(r'[^\d\.]2\.', path)
-    if v1 is not None:
-        if v2 is None:
-            print 'Using libevent 1: "%s"' % path
-            return 1
-    elif v2 is not None:
-        print 'Using libevent 2: "%s"' % path
-        return 2
-
-
-def get_version_from_library_path(d):
-    if VERBOSE:
-        print 'checking %s for %s' % (d, libevent_shared_name)
-    libevent_fpath = join(d, libevent_shared_name)
-    if exists(libevent_fpath):
-        if ctypes:
-            return get_version_from_ctypes( ctypes.CDLL(libevent_fpath), libevent_fpath )
-        else:
-            return get_version_from_path(d)
-
-
-def unique(lst):
-    result = []
-    for item in lst:
-        if item not in result:
-            result.append(item)
-    return result
-
-
 # parse options: -I NAME / -INAME / -L NAME / -LNAME / -1 / -2 / --libevent DIR / --static / --dynamic
 # we're cutting out options from sys.path instead of using optparse
 # so that these option can co-exists with distutils' options
 i = 1
 while i < len(sys.argv):
     arg = sys.argv[i]
-    if arg == '-I':
-        del sys.argv[i]
-        add_include_dir(sys.argv[i])
-    elif arg.startswith('-I'):
-        add_include_dir(arg[2:])
-    elif arg == '-L':
-        del sys.argv[i]
-        add_library_dir(sys.argv[i])
-    elif arg.startswith('-L'):
-        add_library_dir(arg[2:])
-    elif arg == '-1':
-        LIBEVENT_MAJOR = 1
-    elif arg == '-2':
-        LIBEVENT_MAJOR = 2
-    elif arg == '--libevent':
+    if arg == '--libevent':
         del sys.argv[i]
         libevent_source_path = sys.argv[i]
         add_include_dir(join(libevent_source_path, 'include'), must_exist=False)
@@ -227,54 +165,9 @@ while i < len(sys.argv):
     del sys.argv[i]
 
 
-def guess_libevent_major():
-    # try to figure out libevent version from -I and -L options
-    for d in include_dirs:
-        result = get_version_from_include_path(d)
-        if result:
-            return result
-
-    for d in library_dirs:
-        result = get_version_from_library_path(d)
-        if result:
-            return result
-
-    if ctypes:
-        try:
-            libevent = ctypes.cdll.LoadLibrary(libevent_shared_name)
-            result = get_version_from_ctypes(libevent, libevent_shared_name)
-            if result:
-                return result
-        except OSError:
-            pass
-
-    # search system library dirs (unless explicit library directory was provided)
-    if not library_dirs:
-        library_paths = os.environ.get('LD_LIBRARY_PATH', '').split(':')
-        library_paths += ['%s/lib' % sys.prefix,
-                          '%s/lib64' % sys.prefix,
-                          '/usr/lib/',
-                          '/usr/lib64/',
-                          '/usr/local/lib/',
-                          '/usr/local/lib64/']
-
-        for x in unique(library_paths):
-            result = get_version_from_library_path(x)
-            if result:
-                add_library_dir(x)
-                return result
-
-
-if not sys.argv[1:] or '-h' in sys.argv or '--help' in ' '.join(sys.argv):
+if not sys.argv[1:] or  '--help' in ' '.join(sys.argv):
     print __doc__
 else:
-    if LIBEVENT_MAJOR is None:
-        LIBEVENT_MAJOR = guess_libevent_major()
-        if LIBEVENT_MAJOR is None:
-            print 'Cannot guess the version of libevent installed on your system. DEFAULTING TO 1.x.x'
-            LIBEVENT_MAJOR = 1
-    extra_compile_args.append( '-DUSE_LIBEVENT_%s' % LIBEVENT_MAJOR )
-
     if static:
         if not libevent_source_path:
             sys.exit('Please provide path to libevent source with --libevent DIR')
@@ -323,7 +216,7 @@ if __name__ == '__main__':
         url='http://www.gevent.org/',
         packages=['gevent'],
         ext_modules=[gevent_core],
-        cmdclass=cmdclass,
+        cmdclass=dict(build_ext=my_build_ext, config=my_config),
         classifiers=[
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python",
