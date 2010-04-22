@@ -126,6 +126,22 @@ from gevent import core
 
 _ip4_re = re.compile('^[\d\.]+$')
 
+_fileno2evts = {}
+def _register_evt(evt):
+    fd = evt.fd
+    try:
+        _fileno2evts[fd].append(evt)
+    except KeyError:
+        _fileno2evts[fd] = [evt]
+
+def _unregister_evt(evt):
+    fd = evt.fd
+    try:
+        _fileno2evts[fd].remove(evt)
+        if not _fileno2evts[fd]:
+            del _fileno2evts[fd]
+    except Exception:
+        pass
 
 def _wait_helper(ev, evtype):
     current, timeout_exc = ev.arg
@@ -138,27 +154,33 @@ def _wait_helper(ev, evtype):
 def wait_read(fileno, timeout=-1, timeout_exc=_socket.timeout('timed out')):
     evt = core.read_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
     try:
+        _register_evt(evt)
         switch_result = get_hub().switch()
         assert evt is switch_result, 'Invalid switch into wait_read(): %r' % (switch_result, )
     finally:
+        _unregister_evt(evt)
         evt.cancel()
 
 
 def wait_write(fileno, timeout=-1, timeout_exc=_socket.timeout('timed out')):
     evt = core.write_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
     try:
+        _register_evt(evt)
         switch_result = get_hub().switch()
         assert evt is switch_result, 'Invalid switch into wait_write(): %r' % (switch_result, )
     finally:
+        _unregister_evt(evt)
         evt.cancel()
 
 
 def wait_readwrite(fileno, timeout=-1, timeout_exc=_socket.timeout('timed out')):
     evt = core.readwrite_event(fileno, _wait_helper, timeout, (getcurrent(), timeout_exc))
     try:
+        _register_evt(evt)
         switch_result = get_hub().switch()
         assert evt is switch_result, 'Invalid switch into wait_readwrite(): %r' % (switch_result, )
     finally:
+        _unregister_evt(evt)
         evt.cancel()
 
 
@@ -258,10 +280,28 @@ class socket(object):
         return socket(_sock=client_socket), address
 
     def close(self):
+        if isinstance(self._sock,  _closedsocket):
+            return
+
+        fd = self.fileno()
+        _sock = self._sock # keep it open by keeping a reference to it
+
         self._sock = _closedsocket()
         dummy = self._sock._dummy
         for method in _delegate_methods:
             setattr(self, method, dummy)
+
+        evts = list(_fileno2evts.get(fd,  []))
+        for c in evts:
+            c.cancel()
+
+        _sock.close()
+        del _sock
+
+        for c in evts:
+            c.callback(c, 0)
+
+
 
     def connect(self, address):
         if isinstance(address, tuple) and len(address)==2:
