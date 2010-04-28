@@ -25,13 +25,13 @@ import errno
 import sys
 import time
 import traceback
+from datetime import datetime
 
 from urllib import unquote
 from gevent import socket
-import BaseHTTPServer
 import gevent
 from gevent.server import StreamServer
-
+import mimetools
 
 __all__ = ['WSGIHandler', 'WSGIServer']
 
@@ -64,8 +64,6 @@ class Input(object):
 
     def __init__(self, rfile, content_length, wfile=None, wfile_line=None, chunked_input=False):
         self.rfile = rfile
-        if content_length is not None:
-            content_length = int(content_length)
         self.content_length = content_length
 
         self.wfile = wfile
@@ -140,32 +138,85 @@ class Input(object):
             yield line
 
 
-class WSGIHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+class WSGIHandler(object):
     protocol_version = 'HTTP/1.1'
+
+    def __init__(self, socket, address, server):
+        self.request = self.socket = socket
+        self.client_address = self.address = address
+        self.server = server
+        self.rfile = socket.makefile('rb', -1)
+        self.wfile = socket.makefile('wb', 0)
+
+    def handle(self):
+        """Handle multiple requests if necessary."""
+        self.close_connection = False
+        while not self.close_connection:
+            self.handle_one_request()
 
     def handle_one_request(self):
         if self.rfile.closed:
             self.close_connection = 1
             return
 
-        try:
-            self.raw_requestline = self.rfile.readline(MAX_REQUEST_LINE)
-            if len(self.raw_requestline) == MAX_REQUEST_LINE:
-                self.wfile.write(
-                    "HTTP/1.0 414 Request URI Too Long\r\nConnection: close\r\nContent-length: 0\r\n\r\n")
-                self.close_connection = 1
-                return
-        except socket.error, e:
-            if e[0] != errno.EBADF and e[0] != errno.ECONNRESET:
-                raise
-            self.raw_requestline = ''
+        def die400():
+            self.wfile.write("HTTP/1.0 400 Bad Request\r\nConnection: close\r\nContent-length: 0\r\n\r\n")
+            self.close_connection = 1
 
-        if not self.raw_requestline:
+        req = self.rfile.readline(MAX_REQUEST_LINE)
+        if not req:
+            self.close_connection=1
+            return
+
+        if len(req) == MAX_REQUEST_LINE:
+            self.wfile.write(
+                "HTTP/1.0 414 Request URI Too Long\r\nConnection: close\r\nContent-length: 0\r\n\r\n")
             self.close_connection = 1
             return
 
-        if not self.parse_request():
+        req = req.rstrip("\r\n")
+        self.requestline = req
+        words = req.split()
+        if len(words)==3:
+            command, path, version = words
+            if not version.startswith("HTTP/"):
+                die400()
+                return
+        elif len(words)==2:
+            command, path = words
+            version = "HTTP/0.9"
+        else:
+            die400()
             return
+
+
+        self.command = command
+        self.path = path
+        self.request_version = version
+
+        self.headers = mimetools.Message(self.rfile, 0)
+
+        content_length = self.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                content_length = int(content_length)
+                if content_length<0:
+                    raise ValueError("negative content length")
+            except ValueError:
+                die400()
+                return
+
+        self.content_length = content_length
+
+
+        if version=="HTTP/1.1":
+            conntype = self.headers.get("Connection", "").lower()
+            if conntype=="close":
+                self.close_connection = True
+            else:
+                self.close_connection = False
+        else:
+            self.close_connection = True
 
         self.environ = self.get_environ()
         self.application = self.server.application
@@ -233,9 +284,12 @@ class WSGIHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.server.log_message(self.format_request(*args))
 
     def format_request(self, length='-'):
+        # XXX fix datetime format
+        now = datetime.now().replace(microsecond=0)
+
         return '%s - - [%s] "%s" %s %s %.6f' % (
             self.client_address[0],
-            self.log_date_time_string(),
+            now,  # self.log_date_time_string(),
             self.requestline,
             self.status.split()[0],
             self.response_length,
@@ -292,9 +346,9 @@ class WSGIHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         else:
             env['CONTENT_TYPE'] = self.headers.typeheader
 
-        length = self.headers.getheader('content-length')
-        if length:
-            env['CONTENT_LENGTH'] = length
+        if self.content_length is not None:
+            env['CONTENT_LENGTH'] = str(self.content_length)
+
         env['SERVER_PROTOCOL'] = 'HTTP/1.0'
 
         host, port = self.request.getsockname()
@@ -322,14 +376,9 @@ class WSGIHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             wfile = None
             wfile_line = None
         chunked = env.get('HTTP_TRANSFER_ENCODING', '').lower() == 'chunked'
-        self.wsgi_input = Input(self.rfile, length, wfile=wfile, wfile_line=wfile_line, chunked_input=chunked)
+        self.wsgi_input = Input(self.rfile, self.content_length, wfile=wfile, wfile_line=wfile_line, chunked_input=chunked)
         env['wsgi.input'] = self.wsgi_input
         return env
-
-    def finish(self):
-        BaseHTTPServer.BaseHTTPRequestHandler.finish(self)
-        self.connection.close()
-
 
 class WSGIServer(StreamServer):
     """A WSGI server based on :class:`StreamServer` that supports HTTPS."""
@@ -372,4 +421,3 @@ class WSGIServer(StreamServer):
     def handle(self, socket, address):
         handler = self.handler_class(socket, address, self)
         handler.handle()
-
