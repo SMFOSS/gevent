@@ -179,19 +179,16 @@ class WSGIHandler(object):
 
     def handle_one_request(self):
         if self.rfile.closed:
-            self.close_connection = 1
-            return
+            raise self.CloseConnection()
 
         req = self.rfile.readline(MAX_REQUEST_LINE)
         if not req:
-            self.close_connection=1
-            return
+            raise self.CloseConnection()
 
         if len(req) == MAX_REQUEST_LINE:
             self.wfile.write(
                 "HTTP/1.0 414 Request URI Too Long\r\nConnection: close\r\nContent-length: 0\r\n\r\n")
-            self.close_connection = 1
-            return
+            raise self.CloseConnection()
 
         req = req.rstrip()
         self.requestline = req
