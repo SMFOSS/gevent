@@ -160,7 +160,6 @@ class WSGIHandler(object):
 
     def _die400(self):
         self.wfile.write("HTTP/1.0 400 Bad Request\r\nConnection: close\r\nContent-length: 0\r\n\r\n")
-        self.close_connection = 1
         raise self.CloseConnection("400")
 
     def _check_http_version(self, version):
@@ -210,6 +209,8 @@ class WSGIHandler(object):
         self.request_version = version
 
         self.headers = mimetools.Message(self.rfile, 0)
+        if self.headers.status:
+            self._die400()
 
         content_length = self.headers.get("Content-Length")
         if content_length is not None:
