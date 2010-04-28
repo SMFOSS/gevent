@@ -174,7 +174,7 @@ class WSGIHandler(object):
             self.close_connection = 1
             return
 
-        req = req.rstrip("\r\n")
+        req = req.rstrip()
         self.requestline = req
         words = req.split()
         if len(words)==3:
