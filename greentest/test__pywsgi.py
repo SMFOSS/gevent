@@ -224,6 +224,23 @@ class TestCase(greentest.TestCase):
     def connect(self):
         return socket.create_connection(('127.0.0.1', self.port))
 
+class BadRequestTests(TestCase):
+    validator = None
+
+    @staticmethod
+    def application(env, start_response):
+        start_response('200 OK', [('Content-Type', 'text/plain')])
+        return ['hello ', 'world']
+
+    def test_negative_content_length(self):
+        fd = self.connect().makefile(bufsize=1)
+        fd.write('GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: -100\r\n\r\n')
+        read_http(fd, code=400, reason='Bad Request', version="1.0")
+
+    def test_illegal_content_length(self):
+        fd = self.connect().makefile(bufsize=1)
+        fd.write('GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: abc\r\n\r\n')
+        read_http(fd, code=400, reason='Bad Request', version="1.0")
 
 class CommonTests(TestCase):
 
