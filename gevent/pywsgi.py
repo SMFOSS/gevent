@@ -140,6 +140,7 @@ class Input(object):
 
 class WSGIHandler(object):
     protocol_version = 'HTTP/1.1'
+    class CloseConnection(Exception): pass
 
     def __init__(self, socket, address, server):
         self.request = self.socket = socket
@@ -152,16 +153,34 @@ class WSGIHandler(object):
         """Handle multiple requests if necessary."""
         self.close_connection = False
         while not self.close_connection:
-            self.handle_one_request()
+            try:
+                self.handle_one_request()
+            except self.CloseConnection:
+                return
+
+    def _die400(self):
+        self.wfile.write("HTTP/1.0 400 Bad Request\r\nConnection: close\r\nContent-length: 0\r\n\r\n")
+        self.close_connection = 1
+        raise self.CloseConnection("400")
+
+    def _check_http_version(self, version):
+        try:
+            if not version.startswith("HTTP/"):
+                raise ValueError("bad version")
+
+            v = major, minor = tuple([int(x) for x in version[5:].split(".")]) # "HTTP/"
+            if minor<0 or v<(0, 9) or v>=(2, 0):
+                raise ValueError("bad version")
+        except ValueError:
+            self._die400()
+
+    def _check_http_command(self, command):
+        pass
 
     def handle_one_request(self):
         if self.rfile.closed:
             self.close_connection = 1
             return
-
-        def die400():
-            self.wfile.write("HTTP/1.0 400 Bad Request\r\nConnection: close\r\nContent-length: 0\r\n\r\n")
-            self.close_connection = 1
 
         req = self.rfile.readline(MAX_REQUEST_LINE)
         if not req:
@@ -179,16 +198,15 @@ class WSGIHandler(object):
         words = req.split()
         if len(words)==3:
             command, path, version = words
-            if not version.startswith("HTTP/"):
-                die400()
-                return
+            self._check_http_version(version)
+            self._check_http_command(command)
         elif len(words)==2:
             command, path = words
+            if command!="GET":
+                self._die400()
             version = "HTTP/0.9"
         else:
-            die400()
-            return
-
+            self._die400()
 
         self.command = command
         self.path = path
@@ -203,8 +221,7 @@ class WSGIHandler(object):
                 if content_length<0:
                     raise ValueError("negative content length")
             except ValueError:
-                die400()
-                return
+                self._die400()
 
         self.content_length = content_length
 
