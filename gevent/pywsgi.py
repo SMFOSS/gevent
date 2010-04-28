@@ -218,6 +218,8 @@ class WSGIHandler(object):
                 content_length = int(content_length)
                 if content_length<0:
                     raise ValueError("negative content length")
+                if content_length and (command=="GET" or command=="HEAD"):
+                    raise ValueError()
             except ValueError:
                 self._die400()
 
