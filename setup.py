@@ -29,7 +29,8 @@ is a shortcut for
 import sys
 import os
 import re
-from distutils.core import Extension, setup
+import time
+from distutils.core import Extension, setup, Command
 from distutils.command import build_ext, config
 
 from os.path import join, split, exists, isdir, abspath, basename
@@ -48,6 +49,66 @@ extra_compile_args = []
 sources = ['gevent/core.c']
 libraries = []
 extra_objects = []
+
+class build_libevent(Command):
+    description = "download and compile libevent"
+    user_options=[]
+    url = "http://www.monkey.org/~provos/libevent-1.4.13-stable.tar.gz"
+    digest = "0b3ea18c634072d12b3c1ee734263664"
+    basename = "libevent-1.4.13-stable"
+
+    def finalize_options(self):
+        pass
+    def initialize_options(self):
+        pass
+    def run(self):
+        import urllib, tarfile
+        try:
+            from hashlib import md5
+        except ImportError:
+            from md5 import md5
+        url = self.url
+
+        fn = url.split("/")[-1]
+        dirname = fn[:-len(".tar.gz")]
+
+        if os.path.exists(fn):
+            pass
+        else:
+            print "downloading libevent source from", url
+            tgz = urllib.urlopen(url).read()
+            digest = md5(tgz).hexdigest()
+            if digest!=self.digest:
+                sys.exit("wrong md5 sum")
+            print "md5 sum ok"
+            open(fn, "wb").write(tgz)
+
+        tf = tarfile.open(fn,'r:gz')
+        tf.extractall(".")
+        addlibs = []
+
+        cwd = os.getcwd()
+        os.chdir(dirname)
+        try:
+            if not os.path.exists("./config.status"):
+                os.system("./configure --with-pic --disable-shared")
+            os.system("make")
+            for line in open("Makefile"):
+                if line.startswith("LIBS = "):
+                    addlibs = [x[2:] for x in line[len("LIBS = "):].strip().split() if x.startswith("-l")]
+        finally:
+            os.chdir(cwd)
+
+
+        config = self.distribution.reinitialize_command('config')
+        config.include_dirs = [self.basename, "%s/include" % self.basename]
+        config.library_dirs = ["%s/.libs" % self.basename]
+        config.libraries = addlibs
+
+class build_libevent2(build_libevent):
+    url = "http://monkey.org/~provos/libevent-2.0.4-alpha.tar.gz"
+    digest = "dbc50f32af9f2ade151a0737e5edf205"
+    basename="libevent-2.0.4-alpha"
 
 class my_config(config.config):
     def run(self):
@@ -87,13 +148,22 @@ GEVENT_USING_LIBEVENT_2
         build.define = 'USE_LIBEVENT_%s' % version
         build.include_dirs = self.include_dirs
         build.library_dirs = self.library_dirs
-
+        build.libraries = self.libraries
 
 # hack: create a symlink from build/../core.so to gevent/core.so to prevent "ImportError: cannot import name core" failures
 
 class my_build_ext(build_ext.build_ext):
     def finalize_options(self):
-        self.run_command('config')
+        try:
+            self.run_command('config')
+        except RuntimeError, err:
+            print "\ngevent setup.py: could not find a working libevent installation: %s" % (err, )
+            print "setup.py will download libevent and compile it in 5 seconds (hit CTRL-C to abort)\n"
+            time.sleep(5)
+
+            self.run_command("build_libevent")
+            self.run_command('config')
+
         build_ext.build_ext.finalize_options(self)
 
     def build_extension(self, ext):
@@ -216,7 +286,9 @@ if __name__ == '__main__':
         url='http://www.gevent.org/',
         packages=['gevent'],
         ext_modules=[gevent_core],
-        cmdclass=dict(build_ext=my_build_ext, config=my_config),
+        cmdclass=dict(build_ext=my_build_ext, config=my_config,
+                      build_libevent=build_libevent,  build_libevent1=build_libevent,
+                      build_libevent2=build_libevent2),
         classifiers=[
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python",
