@@ -62,6 +62,9 @@ class my_build_ext(build_ext.build_ext):
             sys.exit(1)
 
     def build_extension(self, ext):
+        if os.environ.get("GEVENT_DOWNLOAD_LIBEVENT") and sys.platform!="win32":
+            download_and_compile_libevent(self)
+
         self.compile_cython()
         result = build_ext.build_ext.build_extension(self, ext)
         # hack: create a symlink from build/../core.so to gevent/core.so
@@ -93,6 +96,104 @@ class my_build_ext(build_ext.build_ext):
 
 cmdclass = {'build_ext': my_build_ext}
 
+known_urls = [(["1", "1.4.13", "1.4.13-stable"],
+               "http://www.monkey.org/~provos/libevent-1.4.13-stable.tar.gz",
+               "0b3ea18c634072d12b3c1ee734263664"),
+
+              (["2", "2.0.5-beta"],
+               "http://www.monkey.org/~provos/libevent-2.0.5-beta.tar.gz",
+               "600c2ebbcc04b1235df2baccf2767307")]
+
+def choose_libevent_url():
+    v = os.environ.get("GEVENT_DOWNLOAD_LIBEVENT", "1")
+
+    for aliases, url, digest in known_urls:
+        if v.lower() in aliases:
+            return url, digest
+
+    if v.lower().startswith("http://") or v.lower().startswith("https://"):
+        return url, None
+
+    return "http://www.monkey.org/~provos/libevent-%s.tar.gz" % (v,), None
+
+def download_and_extract((url, digest)):
+    import urllib
+    import tarfile
+    import time
+    from md5 import md5
+
+    assert url.endswith(".tar.gz"), "can only download .tar.gz files"
+    fn = url.split("/")[-1]
+    dirname = fn[:-len(".tar.gz")]
+    fn = os.path.abspath(fn)
+
+    if not exists(fn):
+        print "downloading libevent source from %s to %s" % (url, fn)
+        if not digest:
+            print "WARNING: cannot check integrity of the above url (no md5 sum)."
+            print "WARNING: hit CTRL-c in the next 10 seconds if that bothers you."
+            stime=time.time()
+
+        tgz = urllib.urlopen(url).read()
+        if digest and md5(tgz).hexdigest() != digest:
+            sys.exit("wrong md5 sum")
+        if not digest:
+            left = stime+10-time.time()
+            if left>0:
+                time.sleep(left)
+        open(fn, "wb").write(tgz)
+
+    tf = tarfile.open(fn, 'r:gz')
+    tf.extractall(".")
+    return dirname
+
+def download_and_compile_libevent(build):
+    from distutils import sysconfig
+    dirname = download_and_extract(choose_libevent_url())
+    addlibs = []
+
+    cwd = os.getcwd()
+    os.chdir(dirname)
+    try:
+        if "CC" not in os.environ:
+            cc = sysconfig.get_config_var("CC")
+            if cc:
+                os.environ["CC"] = cc
+
+        if not exists("./config.status"):
+            err = os.system("./configure --with-pic --disable-shared")
+            if err:
+                sys.exit("running './configure --with-pic --disable-shared' failed")
+        err = os.system("make")
+        if err:
+            sys.exit("running 'make' failed")
+
+        for line in open("Makefile"):
+            if line.startswith("LIBS = "):
+                addlibs = [x[2:] for x in line[len("LIBS = "):].strip().split() if x.startswith("-l")]
+    finally:
+        os.chdir(cwd)
+
+    if build is None:
+        return
+
+    if build.include_dirs is None:
+        build.include_dirs = []
+    if build.library_dirs is None:
+        build.library_dirs = []
+    build.include_dirs[:0] = [dirname, "%s/include" % dirname]
+    build.library_dirs[:0] = ["%s/.libs" % dirname]
+    build.libraries.extend(addlibs)
+
+    cc = build.compiler
+    if sys.platform == "darwin":
+        # stupid apple: http://developer.apple.com/mac/library/qa/qa2006/qa1393.html
+        cc.linker_so += ['-Wl,-search_paths_first']
+        cc.linker_exe += ['-Wl,-search_paths_first']
+
+    cc.set_include_dirs(build.include_dirs)
+    cc.set_library_dirs(build.library_dirs)
+    cc.set_libraries(build.libraries)
 
 def check_dir(path, must_exist):
     if not isdir(path):
@@ -112,6 +213,13 @@ def add_library_dir(path, must_exist=True):
         check_dir(path, must_exist)
         library_dirs.append(path)
 
+def enable_libevent_source_path():
+    add_include_dir(join(libevent_source_path, 'include'), must_exist=False)
+    add_include_dir(libevent_source_path, must_exist=False)
+    add_library_dir(join(libevent_source_path, '.libs'), must_exist=False)
+    if sys.platform == 'win32':
+        add_include_dir(join(libevent_source_path, 'compat'), must_exist=False)
+        add_include_dir(join(libevent_source_path, 'WIN32-Code'), must_exist=False)
 
 # parse options: -I NAME / -INAME / -L NAME / -LNAME / --libevent DIR
 # we're cutting out options from sys.path instead of using optparse
@@ -132,12 +240,7 @@ while i < len(sys.argv):
     elif arg == '--libevent':
         del sys.argv[i]
         libevent_source_path = sys.argv[i]
-        add_include_dir(join(libevent_source_path, 'include'), must_exist=False)
-        add_include_dir(libevent_source_path, must_exist=False)
-        add_library_dir(join(libevent_source_path, '.libs'), must_exist=False)
-        if sys.platform == 'win32':
-            add_include_dir(join(libevent_source_path, 'compat'), must_exist=False)
-            add_include_dir(join(libevent_source_path, 'WIN32-Code'), must_exist=False)
+        enable_libevent_source_path()
     else:
         i += 1
         continue
@@ -178,6 +281,9 @@ if not sys.argv[1:] or '-h' in sys.argv or '--help' in ' '.join(sys.argv):
     print __doc__
 else:
     if sys.platform == 'win32':
+        if "GEVENT_DOWNLOAD_LIBEVENT" in os.environ and not libevent_source_path:
+            libevent_source_path = download_and_extract(choose_libevent_url())
+            enable_libevent_source_path()
         if not libevent_source_path:
             sys.exit('Please provide path to libevent source with --libevent DIR')
         extra_compile_args += ['-DHAVE_CONFIG_H']
