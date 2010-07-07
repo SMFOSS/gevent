@@ -413,6 +413,8 @@ class WSGIHandler(object):
             if hasattr(self.result, 'close'):
                 self.result.close()
             self.wsgi_input._discard()
+            self.wsgi_input.__dict__.clear() # don't keep references to the socket
+
             self.time_finish = time.time()
             self.log_request()
 
