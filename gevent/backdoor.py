@@ -45,32 +45,9 @@ class SocketConsole(Greenlet):
     def __init__(self, locals, conn):
         Greenlet.__init__(self)
         self.locals = locals
-        # mangle the socket
-        desc = self.desc = _fileobject(conn)
-        readline = desc.readline
-        self.old = {}
-        self.fixups = {
-            'softspace': 0,
-            'isatty': lambda: True,
-            'flush': lambda: None,
-            'readline': lambda *a: readline(*a).replace('\r\n', '\n'),
-        }
-        for key, value in self.fixups.iteritems():
-            if hasattr(desc, key):
-                self.old[key] = getattr(desc, key)
-            setattr(desc, key, value)
+        self.desc = _fileobject(conn)
 
     def finalize(self):
-        # restore the state of the socket
-        for key in self.fixups:
-            try:
-                value = self.old[key]
-            except KeyError:
-                delattr(self.desc, key)
-            else:
-                setattr(self.desc, key, value)
-        self.fixups.clear()
-        self.old.clear()
         self.desc = None
 
     def switch(self, *args, **kw):
@@ -86,8 +63,8 @@ class SocketConsole(Greenlet):
             try:
                 console = InteractiveConsole(self.locals)
                 console.interact()
-            except SystemExit: # raised by quit()
-                pass
+            except SystemExit:  # raised by quit()
+                sys.exc_clear()
         finally:
             self.switch_out()
             self.finalize()
@@ -109,10 +86,17 @@ class _fileobject(socket._fileobject):
     def write(self, data):
         self._sock.sendall(data)
 
+    def isatty(self):
+        return True
+
+    def flush(self):
+        pass
+
+    def readline(self, *a):
+        return socket._fileobject.readline(self, *a).replace("\r\n", "\n")
 
 if __name__ == '__main__':
     if not sys.argv[1:]:
         print 'USAGE: %s PORT' % sys.argv[0]
     else:
         BackdoorServer(('127.0.0.1', int(sys.argv[1]))).serve_forever()
-
