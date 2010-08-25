@@ -11,3 +11,6 @@ doc/_build
 doc/changelog.rst
 push
 .ropeproject
+*.o
+*.la
+*.lo
