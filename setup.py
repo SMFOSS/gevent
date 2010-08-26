@@ -103,10 +103,14 @@ def mysystem(cmd):
 def compile_libevent(build):
     from distutils import sysconfig
     dirname = "libevent1-src"
+    configure = os.path.abspath(os.path.join(dirname, "configure"))
     addlibs = []
+    bdir = os.path.join(build.build_temp, "libevent")
+    if not os.path.isdir(bdir):
+        os.makedirs(bdir)
 
     cwd = os.getcwd()
-    os.chdir(dirname)
+    os.chdir(bdir)
     try:
         if "CC" not in os.environ:
             cc = sysconfig.get_config_var("CC")
@@ -114,7 +118,7 @@ def compile_libevent(build):
                 os.environ["CC"] = cc
 
         if not exists("./config.status"):
-            mysystem("./configure --with-pic --disable-shared --disable-dependency-tracking")
+            mysystem("%s --with-pic --disable-shared --disable-dependency-tracking" % configure)
         mysystem("make")
 
         for line in open("Makefile"):
@@ -131,7 +135,7 @@ def compile_libevent(build):
     if build.library_dirs is None:
         build.library_dirs = []
     build.include_dirs[:0] = [dirname, "%s/include" % dirname]
-    build.library_dirs[:0] = ["%s/.libs" % dirname]
+    build.library_dirs[:0] = ["%s/.libs" % bdir]
     build.libraries.extend(addlibs)
 
     cc = build.compiler
