@@ -134,7 +134,8 @@ def compile_libevent(build):
         build.include_dirs = []
     if build.library_dirs is None:
         build.library_dirs = []
-    build.include_dirs[:0] = [dirname, "%s/include" % dirname]
+    # bdir is needed for event-config.h
+    build.include_dirs[:0] = [bdir, dirname, "%s/include" % dirname]
     build.library_dirs[:0] = ["%s/.libs" % bdir]
     build.libraries.extend(addlibs)
 
