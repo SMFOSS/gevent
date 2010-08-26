@@ -62,8 +62,7 @@ class my_build_ext(build_ext.build_ext):
             sys.exit(1)
 
     def build_extension(self, ext):
-        if sys.platform!="win32":
-            compile_libevent(self)
+        compile_libevent(self)
 
         self.compile_cython()
         result = build_ext.build_ext.build_extension(self, ext)
@@ -101,9 +100,13 @@ def mysystem(cmd):
         sys.exit("running %r failed" % cmd)
 
 def compile_libevent(build):
+    sdir = libevent_source_path
+    if not sdir:
+        return
+
     from distutils import sysconfig
-    dirname = "libevent1-src"
-    configure = os.path.abspath(os.path.join(dirname, "configure"))
+
+    configure = os.path.abspath(os.path.join(sdir, "configure"))
     addlibs = []
     bdir = os.path.join(build.build_temp, "libevent")
     if not os.path.isdir(bdir):
@@ -139,7 +142,7 @@ def compile_libevent(build):
     if build.library_dirs is None:
         build.library_dirs = []
     # bdir is needed for event-config.h
-    build.include_dirs[:0] = [bdir, dirname, "%s/include" % dirname]
+    build.include_dirs[:0] = [bdir, sdir, "%s/include" % sdir]
     build.library_dirs[:0] = ["%s/.libs" % bdir]
     build.libraries.extend(addlibs)
 
@@ -179,6 +182,14 @@ def enable_libevent_source_path():
         add_include_dir(join(libevent_source_path, 'compat'), must_exist=False)
         add_include_dir(join(libevent_source_path, 'WIN32-Code'), must_exist=False)
 
+    global compile_libevent
+    compile_libevent = lambda *a: None
+
+
+
+if os.path.isdir("libevent1-src"):
+    libevent_source_path = "libevent1-src"
+
 # parse options: -I NAME / -INAME / -L NAME / -LNAME / --libevent DIR
 # we're cutting out options from sys.path instead of using optparse
 # so that these option can co-exists with distutils' options
@@ -198,7 +209,6 @@ while i < len(sys.argv):
     elif arg == '--libevent':
         del sys.argv[i]
         libevent_source_path = sys.argv[i]
-        enable_libevent_source_path()
     else:
         i += 1
         continue
@@ -240,12 +250,9 @@ if not sys.argv[1:] or '-h' in sys.argv or '--help' in ' '.join(sys.argv):
 else:
     if sys.platform == 'win32':
         if not libevent_source_path:
-            libevent_source_path = "libevent1-src"
-            enable_libevent_source_path()
-        if not libevent_source_path:
             sys.exit('Please provide path to libevent source with --libevent DIR')
-        extra_compile_args += ['-DHAVE_CONFIG_H']
-        extra_compile_args += ['-DWIN32']
+        enable_libevent_source_path()
+        extra_compile_args += ['-DHAVE_CONFIG_H', '-DWIN32']
         libraries = ['wsock32', 'advapi32', 'ws2_32', 'shell32']
         include_dirs.extend([ join(libevent_source_path, 'WIN32-Code'),
                               join(libevent_source_path, 'compat') ])
@@ -257,7 +264,8 @@ else:
             sources.append(filename)
     else:
         libraries = ['event']
-
+        if libevent_source_path and os.path.exists(os.path.join(libevent_source_path, ".libs")):
+            enable_libevent_source_path()
 
 gevent_core = Extension(name='gevent.core',
                         sources=sources,
