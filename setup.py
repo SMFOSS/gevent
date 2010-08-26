@@ -117,6 +117,10 @@ def compile_libevent(build):
             if cc:
                 os.environ["CC"] = cc
 
+            archflags = sysconfig.get_config_var("ARCHFLAGS")
+            if archflags:
+                os.environ["AM_CFLAGS"] = archflags
+
         if not exists("./config.status"):
             mysystem("%s --with-pic --disable-shared --disable-dependency-tracking" % configure)
         mysystem("make")
